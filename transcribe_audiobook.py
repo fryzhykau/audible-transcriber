@@ -6,16 +6,30 @@ For personal use of purchased audiobooks.
 Requirements:
     pip install openai-whisper audible tqdm psutil
 
-    For faster transcription (recommended, 4x speed boost):
-        pip install faster-whisper
+    For faster-whisper backend:
+        pip install faster-whisper nvidia-cublas-cu12 nvidia-cudnn-cu12
 
 You'll also need FFmpeg installed:
     - Windows: winget install ffmpeg  OR  choco install ffmpeg
     - Or download from: https://ffmpeg.org/download.html
 
 Usage:
-    python transcribe_audiobook.py <audiobook.aax> [--model medium]
-    python transcribe_audiobook.py <audiobook.aax> --fast   # 4x faster with same model
+    # OpenAI Whisper (original) - processes entire file at once
+    python transcribe_audiobook.py <audiobook.m4a>
+
+    # faster-whisper - uses chunked processing for large files
+    python transcribe_audiobook.py <audiobook.m4a> --fast
+
+    # faster-whisper without chunking (process entire file at once)
+    python transcribe_audiobook.py <audiobook.m4a> --fast --no-chunk
+
+Backends:
+    OpenAI Whisper (default): Original implementation, processes entire file at once.
+                              May be faster for very long files due to no chunk overhead.
+
+    faster-whisper (--fast):  CTranslate2-based, typically 4x faster for short files.
+                              Uses chunked processing for files >1 hour by default.
+                              Use --no-chunk to disable chunking.
 
 Options:
     --model, -m           Model size: tiny, base, small, medium, large (default: medium)
@@ -24,7 +38,8 @@ Options:
     --no-stats            Skip displaying statistics after transcription
 
 GPU Performance Options:
-    --fast                Use faster-whisper backend (4x faster, same accuracy)
+    --fast                Use faster-whisper backend
+    --no-chunk            Disable chunked processing (faster-whisper only)
     --high-performance    Combines --fast with optimized GPU settings
     --gpu-utilization     GPU memory fraction (0.0-1.0). E.g., 0.8 for 80%
     --beam-size           Beam size for search (default: 5)
@@ -115,8 +130,73 @@ def convert_aax_to_m4a(aax_path: Path, activation_bytes: str) -> Path:
     return output_path
 
 
+def print_gpu_info():
+    """Print detailed GPU information to help diagnose which GPU is being used."""
+    import torch
+
+    print("\n" + "=" * 60)
+    print("GPU DETECTION")
+    print("=" * 60)
+
+    if not torch.cuda.is_available():
+        print("WARNING: CUDA is NOT available!")
+        print("  - PyTorch cannot see any NVIDIA GPU")
+        print("  - Will fall back to CPU (very slow)")
+        print("  - If on laptop: plug in power adapter")
+        print("=" * 60 + "\n")
+        return False, None
+
+    device_count = torch.cuda.device_count()
+    print(f"CUDA available: Yes")
+    print(f"CUDA devices found: {device_count}")
+
+    for i in range(device_count):
+        name = torch.cuda.get_device_name(i)
+        props = torch.cuda.get_device_properties(i)
+        mem_gb = props.total_memory / (1024**3)
+        print(f"\n  GPU {i}: {name}")
+        print(f"    Memory: {mem_gb:.1f} GB")
+        print(f"    Compute capability: {props.major}.{props.minor}")
+
+        # Warn if it looks like an integrated GPU
+        if "Intel" in name or "Iris" in name:
+            print(f"    WARNING: This appears to be an integrated GPU!")
+
+    # Check which one will be used (device 0)
+    primary_gpu = torch.cuda.get_device_name(0)
+    print(f"\n>>> Will use: {primary_gpu}")
+
+    if "NVIDIA" in primary_gpu and ("RTX" in primary_gpu or "GTX" in primary_gpu):
+        print(">>> Status: OK - Using dedicated NVIDIA GPU")
+    else:
+        print(">>> WARNING: May not be using dedicated GPU!")
+
+    print("=" * 60 + "\n")
+    return True, primary_gpu
+
+
+def get_gpu_memory_nvidia_smi() -> tuple:
+    """Get GPU memory usage via nvidia-smi (more accurate for CTranslate2/faster-whisper).
+
+    Returns (used_gb, total_gb) or (None, None) if unavailable.
+    """
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.used,memory.total", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0:
+            line = result.stdout.strip().split('\n')[0]  # First GPU
+            used_mb, total_mb = map(float, line.split(','))
+            return used_mb / 1024, total_mb / 1024
+    except Exception:
+        pass
+    return None, None
+
+
 def transcribe_audio_fast(audio_path: Path, model_size: str = "medium",
-                          beam_size: int = 5, batch_size: int = 16) -> tuple:
+                          beam_size: int = 5, batch_size: int = 16,
+                          disable_chunking: bool = False) -> tuple:
     """Transcribe audio using faster-whisper (CTranslate2). Returns (result, duration_seconds, stats)."""
 
     try:
@@ -127,6 +207,9 @@ def transcribe_audio_fast(audio_path: Path, model_size: str = "medium",
         from faster_whisper import WhisperModel
 
     import torch
+
+    # Print GPU detection info
+    cuda_available, gpu_name = print_gpu_info()
 
     stats = {
         'device': None,
@@ -145,19 +228,17 @@ def transcribe_audio_fast(audio_path: Path, model_size: str = "medium",
     }
 
     # Check for GPU
-    if torch.cuda.is_available():
+    if cuda_available and gpu_name:
         device = "cuda"
         compute_type = "float16"  # Use FP16 for speed
-        gpu_name = torch.cuda.get_device_name(0)
         stats['device'] = 'GPU (faster-whisper)'
         stats['gpu_name'] = gpu_name
         stats['gpu_memory_total'] = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-        print(f"\nUsing GPU: {gpu_name} (faster-whisper backend)")
     else:
         device = "cpu"
         compute_type = "int8"  # Use INT8 on CPU for speed
         stats['device'] = 'CPU (faster-whisper)'
-        print("\nUsing CPU with INT8 quantization (faster-whisper backend)")
+        print("Falling back to CPU with INT8 quantization (this will be slow)")
 
     print(f"Loading faster-whisper model '{model_size}'...")
     print("(First run will download/convert the model)\n")
@@ -179,6 +260,49 @@ def transcribe_audio_fast(audio_path: Path, model_size: str = "medium",
 
     print(f"Audio: {audio_path.name}")
     print(f"Duration: {format_timestamp(duration_seconds)}")
+
+    # Use chunk-based processing for large files (>1 hour) for better GPU utilization
+    # Can be disabled with --no-chunk flag
+    CHUNK_THRESHOLD = 3600  # 1 hour in seconds
+    CHUNK_DURATION = 1800   # 30 minutes per chunk
+
+    if duration_seconds > CHUNK_THRESHOLD and not disable_chunking:
+        return _transcribe_chunked(
+            audio_path, model, duration_seconds, device, beam_size,
+            batch_size, stats, torch, CHUNK_DURATION
+        )
+
+    # For shorter files or when chunking is disabled, use direct transcription
+    if disable_chunking and duration_seconds > CHUNK_THRESHOLD:
+        print(f"Chunking disabled - processing entire file at once...")
+    return _transcribe_direct(
+        audio_path, model, duration_seconds, device, beam_size,
+        batch_size, stats, torch
+    )
+
+
+def _transcribe_direct(audio_path: Path, model, duration_seconds: float,
+                       device: str, beam_size: int, batch_size: int,
+                       stats: dict, torch) -> tuple:
+    """Direct transcription for smaller files (under 1 hour)."""
+    import subprocess as sp
+
+    # Convert to WAV for faster processing (M4A decoding is very slow in faster-whisper)
+    original_audio_path = audio_path
+    if audio_path.suffix.lower() in ['.m4a', '.mp3', '.aac', '.ogg', '.flac']:
+        wav_path = audio_path.with_suffix('.temp.wav')
+        print(f"Converting to WAV for faster processing...")
+        convert_start = time.time()
+        convert_cmd = [
+            "ffmpeg", "-y", "-i", str(audio_path),
+            "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le",
+            str(wav_path), "-loglevel", "error"
+        ]
+        sp.run(convert_cmd, check=True)
+        print(f"Conversion completed in {time.time() - convert_start:.1f}s")
+        audio_path = wav_path
+        stats['wav_conversion_time'] = time.time() - convert_start
+
     print(f"Transcribing with batch_size={batch_size}, beam_size={beam_size}...")
 
     # Track resources during transcription
@@ -197,8 +321,7 @@ def transcribe_audio_fast(audio_path: Path, model_size: str = "medium",
                 str(audio_path),
                 language="en",
                 beam_size=beam_size,
-                vad_filter=True,  # Voice activity detection for faster processing
-                vad_parameters=dict(min_silence_duration_ms=500),
+                vad_filter=False,
             )
             detected_language[0] = info.language
             for segment in segments:
@@ -233,12 +356,17 @@ def transcribe_audio_fast(audio_path: Path, model_size: str = "medium",
             mem = psutil.virtual_memory()
             memory_samples.append(mem.used / (1024**3))
 
+            # Track GPU memory using nvidia-smi (more accurate for CTranslate2)
             if device == "cuda":
-                try:
-                    current_gpu_mem = torch.cuda.memory_allocated() / (1024**3)
-                    peak_gpu_memory[0] = max(peak_gpu_memory[0], current_gpu_mem)
-                except Exception:
-                    pass
+                gpu_used, _ = get_gpu_memory_nvidia_smi()
+                if gpu_used is not None:
+                    peak_gpu_memory[0] = max(peak_gpu_memory[0], gpu_used)
+                else:
+                    try:
+                        current_gpu_mem = torch.cuda.memory_allocated() / (1024**3)
+                        peak_gpu_memory[0] = max(peak_gpu_memory[0], current_gpu_mem)
+                    except Exception:
+                        pass
 
         pbar.n = 100
         pbar.refresh()
@@ -254,16 +382,20 @@ def transcribe_audio_fast(audio_path: Path, model_size: str = "medium",
 
     if device == "cuda":
         stats['gpu_memory_used'] = peak_gpu_memory[0]
-        try:
-            stats['gpu_memory_used'] = max(stats['gpu_memory_used'], torch.cuda.max_memory_allocated() / (1024**3))
-        except Exception:
-            pass
 
     if duration_seconds > 0:
         stats['realtime_factor'] = duration_seconds / stats['transcription_time']
 
     if error[0]:
         raise error[0]
+
+    # Cleanup temporary WAV file if we created one
+    if audio_path != original_audio_path and audio_path.exists():
+        try:
+            audio_path.unlink()
+            print(f"Cleaned up temporary file: {audio_path.name}")
+        except Exception:
+            pass
 
     # Format result to match openai-whisper structure
     result = {
@@ -272,6 +404,205 @@ def transcribe_audio_fast(audio_path: Path, model_size: str = "medium",
         "language": detected_language[0] or "en",
     }
 
+    stats['processing_mode'] = 'direct'
+    return result, duration_seconds, stats
+
+
+def _transcribe_chunked(audio_path: Path, model, duration_seconds: float,
+                        device: str, beam_size: int, batch_size: int,
+                        stats: dict, torch, chunk_duration: int = 1800) -> tuple:
+    """Chunk-based transcription for large files. Better GPU utilization."""
+    import subprocess as sp
+    import tempfile
+
+    print(f"\nUsing chunk-based processing for better GPU utilization...")
+    print(f"Chunk size: {chunk_duration // 60} minutes")
+
+    num_chunks = int(duration_seconds // chunk_duration) + 1
+    print(f"Total chunks: {num_chunks}\n")
+
+    # Track resources
+    cpu_samples = []
+    memory_samples = []
+    peak_gpu_memory = [0]
+
+    all_segments = []
+    all_text = []
+    detected_language = "en"
+    chunk_times = []  # Track time per chunk for ETA calculation
+
+    transcribe_start = time.time()
+
+    # Reset GPU memory stats for accurate tracking
+    if device == "cuda":
+        try:
+            torch.cuda.reset_peak_memory_stats()
+        except Exception:
+            pass
+
+    # Create temp directory for chunk files
+    temp_dir = Path(tempfile.gettempdir()) / f"whisper_chunks_{audio_path.stem}"
+    temp_dir.mkdir(exist_ok=True)
+
+    try:
+        for chunk_idx in range(num_chunks):
+            chunk_start_time = chunk_idx * chunk_duration
+            chunk_process_start = time.time()
+
+            # Calculate actual chunk duration (last chunk may be shorter)
+            actual_chunk_duration = min(chunk_duration, duration_seconds - chunk_start_time)
+            if actual_chunk_duration <= 0:
+                break
+
+            # Calculate progress percentage
+            progress_pct = (chunk_idx / num_chunks) * 100
+            audio_position = format_timestamp(chunk_start_time)
+            audio_end = format_timestamp(min(chunk_start_time + chunk_duration, duration_seconds))
+
+            # Calculate ETA based on average chunk time
+            if chunk_times:
+                avg_chunk_time = sum(chunk_times) / len(chunk_times)
+                remaining_chunks = num_chunks - chunk_idx
+                eta_seconds = avg_chunk_time * remaining_chunks
+                eta_str = format_timestamp(eta_seconds)
+            else:
+                eta_str = "calculating..."
+
+            # Print detailed progress line
+            print(f"\r[{progress_pct:5.1f}%] Chunk {chunk_idx + 1}/{num_chunks} | "
+                  f"{audio_position} -> {audio_end} | "
+                  f"Segments: {len(all_segments):,} | "
+                  f"ETA: {eta_str}    ", end="", flush=True)
+
+            # Extract chunk to WAV
+            chunk_wav = temp_dir / f"chunk_{chunk_idx:04d}.wav"
+
+            extract_cmd = [
+                "ffmpeg", "-y", "-i", str(audio_path),
+                "-ss", str(chunk_start_time),
+                "-t", str(actual_chunk_duration),
+                "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le",
+                str(chunk_wav), "-loglevel", "error"
+            ]
+            sp.run(extract_cmd, check=True)
+
+            # Transcribe chunk
+            chunk_segments = []
+            try:
+                segments, info = model.transcribe(
+                    str(chunk_wav),
+                    language="en",
+                    beam_size=beam_size,
+                    vad_filter=False,
+                )
+
+                if chunk_idx == 0:
+                    detected_language = info.language
+
+                # Collect segments with adjusted timestamps
+                for segment in segments:
+                    seg_data = {
+                        "start": segment.start + chunk_start_time,
+                        "end": segment.end + chunk_start_time,
+                        "text": segment.text,
+                    }
+                    all_segments.append(seg_data)
+                    all_text.append(segment.text)
+                    chunk_segments.append(seg_data)
+
+            except Exception as e:
+                print(f"\nError transcribing chunk {chunk_idx}: {e}")
+                continue
+            finally:
+                # Cleanup chunk file immediately to save disk space
+                try:
+                    chunk_wav.unlink()
+                except Exception:
+                    pass
+
+            # Sample resources after each chunk
+            cpu_samples.append(psutil.cpu_percent())
+            mem = psutil.virtual_memory()
+            memory_samples.append(mem.used / (1024**3))
+
+            # Track GPU memory using nvidia-smi (more accurate for CTranslate2)
+            if device == "cuda":
+                gpu_used, _ = get_gpu_memory_nvidia_smi()
+                if gpu_used is not None:
+                    peak_gpu_memory[0] = max(peak_gpu_memory[0], gpu_used)
+                else:
+                    # Fallback to PyTorch tracking
+                    try:
+                        current_gpu_mem = torch.cuda.memory_allocated() / (1024**3)
+                        max_gpu_mem = torch.cuda.max_memory_allocated() / (1024**3)
+                        peak_gpu_memory[0] = max(peak_gpu_memory[0], current_gpu_mem, max_gpu_mem)
+                    except Exception:
+                        pass
+
+            # Track chunk processing time
+            chunk_process_time = time.time() - chunk_process_start
+            chunk_times.append(chunk_process_time)
+
+            # Calculate and show speed for this chunk
+            chunk_speed = actual_chunk_duration / chunk_process_time if chunk_process_time > 0 else 0
+
+            # Update progress with speed info
+            print(f"\r[{progress_pct:5.1f}%] Chunk {chunk_idx + 1}/{num_chunks} | "
+                  f"{audio_position} -> {audio_end} | "
+                  f"Segments: {len(all_segments):,} | "
+                  f"Speed: {chunk_speed:.1f}x | "
+                  f"ETA: {eta_str}    ", end="", flush=True)
+
+        # Final progress update
+        print(f"\r[100.0%] Chunk {num_chunks}/{num_chunks} | "
+              f"Complete | "
+              f"Segments: {len(all_segments):,} | "
+              f"Done!                              ")
+
+    finally:
+        # Cleanup temp directory
+        try:
+            temp_dir.rmdir()
+        except Exception:
+            pass
+
+    transcribe_end = time.time()
+    stats['transcription_time'] = transcribe_end - transcribe_start
+    stats['chunks_processed'] = num_chunks
+    stats['chunk_duration_min'] = chunk_duration // 60
+
+    if cpu_samples:
+        stats['cpu_percent'] = sum(cpu_samples) / len(cpu_samples)
+    if memory_samples:
+        stats['memory_used_gb'] = max(memory_samples)
+    stats['memory_total_gb'] = psutil.virtual_memory().total / (1024**3)
+
+    if device == "cuda":
+        stats['gpu_memory_used'] = peak_gpu_memory[0]
+        # Also try to get the actual peak from PyTorch
+        try:
+            pytorch_peak = torch.cuda.max_memory_allocated() / (1024**3)
+            stats['gpu_memory_used'] = max(stats['gpu_memory_used'], pytorch_peak)
+        except Exception:
+            pass
+
+    if duration_seconds > 0:
+        stats['realtime_factor'] = duration_seconds / stats['transcription_time']
+
+    # Calculate average speed across chunks
+    if chunk_times:
+        stats['avg_chunk_speed'] = (chunk_duration * len(chunk_times)) / sum(chunk_times)
+
+    # Format result
+    result = {
+        "text": "".join(all_text),
+        "segments": all_segments,
+        "language": detected_language or "en",
+    }
+
+    print(f"\nProcessed {len(all_segments):,} segments from {num_chunks} chunks")
+
+    stats['processing_mode'] = 'chunked'
     return result, duration_seconds, stats
 
 
@@ -288,6 +619,9 @@ def transcribe_audio(audio_path: Path, model_size: str = "medium",
         import whisper
 
     import torch
+
+    # Print GPU detection info
+    cuda_available, gpu_name = print_gpu_info()
 
     # Initialize stats dictionary
     stats = {
@@ -307,9 +641,8 @@ def transcribe_audio(audio_path: Path, model_size: str = "medium",
     }
 
     # Check for GPU availability
-    if torch.cuda.is_available():
+    if cuda_available and gpu_name:
         device = "cuda"
-        gpu_name = torch.cuda.get_device_name(0)
         stats['device'] = 'GPU'
         stats['gpu_name'] = gpu_name
         stats['gpu_memory_total'] = torch.cuda.get_device_properties(0).total_memory / (1024**3)
@@ -317,9 +650,7 @@ def transcribe_audio(audio_path: Path, model_size: str = "medium",
         # Set GPU memory fraction limit if specified
         if gpu_memory_fraction is not None:
             torch.cuda.set_per_process_memory_fraction(gpu_memory_fraction, device=0)
-            print(f"\nUsing GPU: {gpu_name} (memory capped at {gpu_memory_fraction*100:.0f}%)")
-        else:
-            print(f"\nUsing GPU: {gpu_name}")
+            print(f"GPU memory capped at {gpu_memory_fraction*100:.0f}%")
 
         # Enable TF32 for better performance on Ampere+ GPUs (RTX 30xx, 40xx)
         torch.backends.cuda.matmul.allow_tf32 = True
@@ -331,7 +662,7 @@ def transcribe_audio(audio_path: Path, model_size: str = "medium",
     else:
         device = "cpu"
         stats['device'] = 'CPU'
-        print("\nUsing CPU (no GPU detected - this will be slower)")
+        print("Falling back to CPU (this will be very slow)")
 
     print(f"Loading Whisper model '{model_size}'...")
     print("(First run will download the model, which may take a few minutes)\n")
@@ -400,12 +731,17 @@ def transcribe_audio(audio_path: Path, model_size: str = "medium",
             mem = psutil.virtual_memory()
             memory_samples.append(mem.used / (1024**3))
 
+            # Track GPU memory - prefer nvidia-smi, fallback to PyTorch
             if device == "cuda":
-                try:
-                    current_gpu_mem = torch.cuda.memory_allocated() / (1024**3)
-                    peak_gpu_memory[0] = max(peak_gpu_memory[0], current_gpu_mem)
-                except Exception:
-                    pass
+                gpu_used, _ = get_gpu_memory_nvidia_smi()
+                if gpu_used is not None:
+                    peak_gpu_memory[0] = max(peak_gpu_memory[0], gpu_used)
+                else:
+                    try:
+                        current_gpu_mem = torch.cuda.memory_allocated() / (1024**3)
+                        peak_gpu_memory[0] = max(peak_gpu_memory[0], current_gpu_mem)
+                    except Exception:
+                        pass
 
         pbar.n = 100
         pbar.refresh()
@@ -423,13 +759,18 @@ def transcribe_audio(audio_path: Path, model_size: str = "medium",
     if device == "cuda":
         stats['gpu_memory_used'] = peak_gpu_memory[0]
         try:
-            stats['gpu_memory_used'] = max(stats['gpu_memory_used'], torch.cuda.max_memory_allocated() / (1024**3))
+            pytorch_peak = torch.cuda.max_memory_allocated() / (1024**3)
+            stats['gpu_memory_used'] = max(stats['gpu_memory_used'], pytorch_peak)
         except Exception:
             pass
 
     # Calculate realtime factor (how much faster/slower than realtime)
     if duration_seconds > 0:
         stats['realtime_factor'] = duration_seconds / stats['transcription_time']
+
+    # Add backend and processing mode info
+    stats['backend'] = 'openai-whisper'
+    stats['processing_mode'] = 'direct'
 
     if error[0]:
         raise error[0]
@@ -524,12 +865,53 @@ def detect_chapters(segments: list, min_gap: float = 3.0) -> list:
     return chapters
 
 
-def save_transcript(result: dict, audio_path: Path, duration_seconds: float, model_size: str) -> list:
+def save_transcript(result: dict, audio_path: Path, duration_seconds: float, model_size: str, stats: dict = None) -> list:
     """Save transcript to multiple formats. Returns list of output file paths."""
+    import json
 
     output_files = []
     segments = result["segments"]
     chapters = detect_chapters(segments)
+
+    # Save statistics to JSON
+    if stats:
+        stats_path = audio_path.parent / f"{audio_path.stem}_stats.json"
+        stats_data = {
+            'source_file': audio_path.name,
+            'audio_duration': duration_seconds,
+            'audio_duration_formatted': format_timestamp(duration_seconds),
+            'transcription_time': stats.get('transcription_time'),
+            'transcription_time_formatted': format_timestamp(stats.get('transcription_time', 0)),
+            'speed_realtime': stats.get('realtime_factor'),
+            'model_size': stats.get('model_size'),
+            'backend': stats.get('backend'),
+            'processing_mode': stats.get('processing_mode'),
+            'chunks_processed': stats.get('chunks_processed'),
+            'chunk_duration_min': stats.get('chunk_duration_min'),
+            'device': stats.get('device'),
+            'gpu_name': stats.get('gpu_name'),
+            'gpu_memory_used_gb': stats.get('gpu_memory_used'),
+            'gpu_memory_total_gb': stats.get('gpu_memory_total'),
+            'cpu_percent_avg': stats.get('cpu_percent'),
+            'ram_used_gb': stats.get('memory_used_gb'),
+            'ram_total_gb': stats.get('memory_total_gb'),
+            'beam_size': stats.get('beam_size'),
+            'batch_size': stats.get('batch_size'),
+            'best_of': stats.get('best_of'),
+            'model_load_time': stats.get('model_load_time'),
+            'wav_conversion_time': stats.get('wav_conversion_time'),
+            'word_count': len(result.get('text', '').split()),
+            'segment_count': len(segments),
+            'detected_language': result.get('language', 'en'),
+            'generated_at': datetime.now().isoformat(),
+        }
+        # Remove None values
+        stats_data = {k: v for k, v in stats_data.items() if v is not None}
+
+        with open(stats_path, 'w', encoding='utf-8') as f:
+            json.dump(stats_data, f, indent=2)
+        print(f"\nStatistics saved to: {stats_path}")
+        output_files.append(stats_path)
 
     # Plain text transcript
     txt_path = audio_path.with_suffix('.txt')
@@ -1131,57 +1513,64 @@ def display_stats(result: dict, audio_path: Path, duration_seconds: float, stats
     print("=" * 70)
 
     # Timing Section
-    print("\n┌─ TIMING ─────────────────────────────────────────────────────────┐")
-    print(f"│  Audio Duration:        {format_timestamp(duration_seconds):>12}                        │")
-    print(f"│  Transcription Time:    {format_timestamp(stats['transcription_time']):>12}                        │")
+    print("\n+-- TIMING " + "-" * 58 + "+")
+    print(f"|  Audio Duration:        {format_timestamp(duration_seconds):>12}                        |")
+    print(f"|  Transcription Time:    {format_timestamp(stats['transcription_time']):>12}                        |")
     if stats.get('realtime_factor'):
         rtf = stats['realtime_factor']
         if rtf >= 1:
-            print(f"│  Speed:                 {rtf:>10.1f}x realtime                      │")
+            print(f"|  Speed:                 {rtf:>10.1f}x realtime                      |")
         else:
-            print(f"│  Speed:                 {rtf:>10.2f}x realtime (slower than audio)  │")
+            print(f"|  Speed:                 {rtf:>10.2f}x realtime (slower than audio)  |")
     if stats.get('model_load_time'):
-        print(f"│  Model Load Time:       {stats['model_load_time']:>10.1f}s                          │")
-    print("└──────────────────────────────────────────────────────────────────┘")
+        print(f"|  Model Load Time:       {stats['model_load_time']:>10.1f}s                          |")
+    if stats.get('wav_conversion_time'):
+        print(f"|  WAV Conversion Time:   {stats['wav_conversion_time']:>10.1f}s                          |")
+    if stats.get('chunks_processed'):
+        chunk_info = f"{stats['chunks_processed']} x {stats.get('chunk_duration_min', 30)}min"
+        print(f"|  Chunks Processed:      {chunk_info:>12}                        |")
+    print("+" + "-" * 68 + "+")
 
     # Resource Utilization Section
-    print("\n┌─ RESOURCE UTILIZATION ───────────────────────────────────────────┐")
-    print(f"│  Device:                {stats['device']:>12}                        │")
+    print("\n+-- RESOURCE UTILIZATION " + "-" * 43 + "+")
+    print(f"|  Device:                {stats['device']:>12}                        |")
     if stats.get('gpu_name'):
         gpu_name_short = stats['gpu_name'][:40] if len(stats['gpu_name']) > 40 else stats['gpu_name']
-        print(f"│  GPU:                   {gpu_name_short:<40} │")
+        print(f"|  GPU:                   {gpu_name_short:<40} |")
     if stats.get('gpu_memory_fraction'):
-        print(f"│  GPU Memory Limit:      {stats['gpu_memory_fraction']*100:>10.0f}%                        │")
+        print(f"|  GPU Memory Limit:      {stats['gpu_memory_fraction']*100:>10.0f}%                        |")
     if stats.get('gpu_memory_used') is not None and stats.get('gpu_memory_total'):
         gpu_mem_pct = (stats['gpu_memory_used'] / stats['gpu_memory_total']) * 100
-        print(f"│  GPU Memory (Peak):     {stats['gpu_memory_used']:>6.2f} GB / {stats['gpu_memory_total']:.2f} GB ({gpu_mem_pct:.1f}%)       │")
+        print(f"|  GPU Memory (Peak):     {stats['gpu_memory_used']:>6.2f} GB / {stats['gpu_memory_total']:.2f} GB ({gpu_mem_pct:.1f}%)       |")
     if stats.get('cpu_percent') is not None:
-        print(f"│  CPU Usage (Avg):       {stats['cpu_percent']:>10.1f}%                        │")
+        print(f"|  CPU Usage (Avg):       {stats['cpu_percent']:>10.1f}%                        |")
     if stats.get('memory_used_gb') is not None and stats.get('memory_total_gb'):
         mem_pct = (stats['memory_used_gb'] / stats['memory_total_gb']) * 100
-        print(f"│  RAM Usage (Peak):      {stats['memory_used_gb']:>6.2f} GB / {stats['memory_total_gb']:.1f} GB ({mem_pct:.1f}%)        │")
-    print(f"│  Model Size:            {stats['model_size']:>12}                        │")
+        print(f"|  RAM Usage (Peak):      {stats['memory_used_gb']:>6.2f} GB / {stats['memory_total_gb']:.1f} GB ({mem_pct:.1f}%)        |")
+    print(f"|  Model Size:            {stats['model_size']:>12}                        |")
     if stats.get('backend'):
-        print(f"│  Backend:               {stats['backend']:>12}                        │")
-    print(f"│  Beam Size:             {stats.get('beam_size', 5):>12}                        │")
+        print(f"|  Backend:               {stats['backend']:>12}                        |")
+    if stats.get('processing_mode'):
+        print(f"|  Processing Mode:       {stats['processing_mode']:>12}                        |")
+    print(f"|  Beam Size:             {stats.get('beam_size', 5):>12}                        |")
     if stats.get('batch_size'):
-        print(f"│  Batch Size:            {stats.get('batch_size'):>12}                        │")
+        print(f"|  Batch Size:            {stats.get('batch_size'):>12}                        |")
     elif stats.get('best_of'):
-        print(f"│  Best Of:               {stats.get('best_of', 5):>12}                        │")
-    print("└──────────────────────────────────────────────────────────────────┘")
+        print(f"|  Best Of:               {stats.get('best_of', 5):>12}                        |")
+    print("+" + "-" * 68 + "+")
 
     # Output Summary Section
-    print("\n┌─ OUTPUT SUMMARY ─────────────────────────────────────────────────┐")
-    print(f"│  Total Words:           {word_count:>12,}                        │")
-    print(f"│  Total Characters:      {char_count:>12,}                        │")
-    print(f"│  Segments:              {segment_count:>12,}                        │")
-    print(f"│  Avg Segment Duration:  {avg_segment_duration:>10.1f}s                          │")
-    print(f"│  Words Per Minute:      {words_per_minute:>10.1f}                          │")
-    print(f"│  Detected Language:     {result.get('language', 'en'):>12}                        │")
-    print("└──────────────────────────────────────────────────────────────────┘")
+    print("\n+-- OUTPUT SUMMARY " + "-" * 50 + "+")
+    print(f"|  Total Words:           {word_count:>12,}                        |")
+    print(f"|  Total Characters:      {char_count:>12,}                        |")
+    print(f"|  Segments:              {segment_count:>12,}                        |")
+    print(f"|  Avg Segment Duration:  {avg_segment_duration:>10.1f}s                          |")
+    print(f"|  Words Per Minute:      {words_per_minute:>10.1f}                          |")
+    print(f"|  Detected Language:     {result.get('language', 'en'):>12}                        |")
+    print("+" + "-" * 68 + "+")
 
     # Files Generated Section
-    print("\n┌─ FILES GENERATED ────────────────────────────────────────────────┐")
+    print("\n+-- FILES GENERATED " + "-" * 48 + "+")
     total_size = 0
     for file_path in output_files:
         if file_path.exists():
@@ -1191,10 +1580,10 @@ def display_stats(result: dict, audio_path: Path, duration_seconds: float, stats
             name = file_path.name
             if len(name) > 45:
                 name = "..." + name[-42:]
-            print(f"│  {name:<45} {size_str:>10} │")
-    print(f"│  {'─' * 56}─────────│")
-    print(f"│  {'Total':45} {format_file_size(total_size):>10} │")
-    print("└──────────────────────────────────────────────────────────────────┘")
+            print(f"|  {name:<45} {size_str:>10} |")
+    print("|  " + "-" * 56 + "--------- |")
+    print(f"|  {'Total':45} {format_file_size(total_size):>10} |")
+    print("+" + "-" * 68 + "+")
 
     print("\n" + "=" * 70)
     print("                    TRANSCRIPTION COMPLETE")
@@ -1273,6 +1662,11 @@ def main():
         action="store_true",
         help="Enable --fast with optimized settings (beam=10, batch=24)"
     )
+    parser.add_argument(
+        "--no-chunk",
+        action="store_true",
+        help="Disable chunk-based processing for faster-whisper (process entire file at once)"
+    )
 
     args = parser.parse_args()
 
@@ -1309,7 +1703,8 @@ def main():
             audio_path,
             model_size=args.model,
             beam_size=args.beam_size,
-            batch_size=args.batch_size
+            batch_size=args.batch_size,
+            disable_chunking=args.no_chunk
         )
     else:
         result, duration_seconds, stats = transcribe_audio(
@@ -1321,7 +1716,7 @@ def main():
         )
 
     # Save transcripts
-    output_files = save_transcript(result, audio_path, duration_seconds, args.model)
+    output_files = save_transcript(result, audio_path, duration_seconds, args.model, stats)
 
     # Display statistics
     if not args.no_stats:
