@@ -94,9 +94,29 @@ python transcribe_audiobook.py MyAudiobook.m4a --skip-convert
 
 The scripts generate multiple output files:
 
-- **Plain text** (`.txt`): Clean transcript without timestamps
-- **Timestamped text** (`_timestamped.txt`): Transcript with time markers
-- **SRT subtitles** (`.srt`): Standard subtitle format (audiobook script only)
+| Format | Extension | Description |
+|--------|-----------|-------------|
+| Plain text | `.txt` | Clean transcript without timestamps |
+| Timestamped | `_timestamped.txt` | Transcript with time markers |
+| SRT subtitles | `.srt` | Standard subtitle format |
+| **Markdown** | `.md` | Structured document with TOC and chapters |
+| **HTML** | `.html` | Interactive viewer with search and navigation |
+
+### Structured Output Features
+
+Both Markdown and HTML outputs include:
+
+- **Table of Contents** - Quick navigation to sections
+- **Chapter/Section Detection** - Automatically detects chapters from text patterns (e.g., "Chapter 1", "Part One", "Prologue")
+- **Time-based Sections** - Falls back to time-based sections if no chapters detected
+- **Metadata** - Source file, duration, model used, language detected
+- **Timestamps** - Each segment includes precise timestamps
+
+The HTML output additionally provides:
+- **Search functionality** - Filter transcript by keywords
+- **Sidebar navigation** - Sticky TOC for easy browsing
+- **Responsive design** - Works on desktop and mobile
+- **Dark theme** - Easy on the eyes
 
 ## Notes
 
