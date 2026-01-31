@@ -1819,6 +1819,14 @@ def update_existing_html(html_path: Path, bg_color: str = "#ffffff") -> Path:
     import re
     import html
 
+    def fully_unescape(text):
+        """Unescape HTML entities repeatedly until fully clean."""
+        prev = None
+        while prev != text:
+            prev = text
+            text = html.unescape(text)
+        return text
+
     print(f"Updating HTML: {html_path}")
 
     with open(html_path, 'r', encoding='utf-8') as f:
@@ -1826,7 +1834,7 @@ def update_existing_html(html_path: Path, bg_color: str = "#ffffff") -> Path:
 
     # Extract title and unescape HTML entities
     title_match = re.search(r'<title>([^<]+)</title>', content)
-    title = html.unescape(title_match.group(1)) if title_match else html_path.stem
+    title = fully_unescape(title_match.group(1)) if title_match else html_path.stem
 
     # Extract duration from timeline max attribute
     duration_match = re.search(r'max="(\d+)"', content)
@@ -1848,8 +1856,8 @@ def update_existing_html(html_path: Path, bg_color: str = "#ffffff") -> Path:
         # Extract paragraphs with their timestamps
         para_matches = re.findall(r'<p data-time="([\d.]+)">([^<]+)</p>', chapter_content)
         for para_time, para_text in para_matches:
-            # Unescape HTML entities to get clean text
-            clean_text = html.unescape(para_text)
+            # Unescape HTML entities to get clean text (may be multi-level escaped)
+            clean_text = fully_unescape(para_text)
             segments.append({
                 "start": float(para_time),
                 "end": float(para_time) + 10,  # Approximate
@@ -1862,7 +1870,7 @@ def update_existing_html(html_path: Path, bg_color: str = "#ffffff") -> Path:
     for chapter_id, chapter_time, chapter_title, chapter_content in chapters_match:
         para_count = len(re.findall(r'<p data-time=', chapter_content))
         chapters.append({
-            'title': html.unescape(chapter_title),
+            'title': fully_unescape(chapter_title),
             'start_time': float(chapter_time),
             'start_segment_idx': segment_idx,
             'type': 'detected'
