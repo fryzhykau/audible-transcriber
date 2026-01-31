@@ -1,0 +1,46 @@
+# Audio files
+*.aax
+*.m4a
+*.mp3
+*.wav
+*.flac
+*.ogg
+*.webm
+
+# Generated transcripts (exclude requirements.txt)
+*_transcript.txt
+*_timestamps.txt
+*_timestamped.txt
+*.srt
+!requirements.txt
+
+# Audible credentials
+.audible_auth.json
+
+# Local project context
+CLAUDE.md
+
+# Windows artifacts
+nul
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environments
+venv/
+env/
+.venv/
+.env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
