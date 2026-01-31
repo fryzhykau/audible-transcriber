@@ -1585,9 +1585,12 @@ def save_html(result: dict, audio_path: Path, duration_seconds: float, model_siz
             }}
         }}
 
-        function scrollToTime(time) {{
+        let lastScrolledElement = null;
+
+        function scrollToTime(time, force = false) {{
             const targetElement = findElementAtTime(time);
-            if (targetElement) {{
+            if (targetElement && (force || targetElement !== lastScrolledElement)) {{
+                lastScrolledElement = targetElement;
                 const offset = document.querySelector('.timeline-container').offsetHeight + 20;
                 const elementTop = targetElement.getBoundingClientRect().top + window.pageYOffset - offset;
                 window.scrollTo({{ top: elementTop, behavior: 'smooth' }});
@@ -1598,14 +1601,19 @@ def save_html(result: dict, audio_path: Path, duration_seconds: float, model_siz
             if (playbackInterval) clearInterval(playbackInterval);
 
             // Get current position from slider
-            currentPlayTime = parseInt(timeline.value);
+            currentPlayTime = parseFloat(timeline.value);
 
             isScrolling = true; // Prevent scroll listener from interfering
             isPlaying = true;
             updatePlaybackUI();
 
+            // Initial scroll to current position
+            scrollToTime(currentPlayTime, true);
+
             // Update every 100ms for smooth progress
             const updateInterval = 100;
+            let lastScrollTime = 0;
+
             playbackInterval = setInterval(() => {{
                 currentPlayTime += (updateInterval / 1000) * playbackSpeed;
 
@@ -1618,9 +1626,18 @@ def save_html(result: dict, audio_path: Path, duration_seconds: float, model_siz
                 timeline.value = currentPlayTime;
                 currentTimeDisplay.textContent = formatTime(Math.floor(currentPlayTime));
 
-                // Scroll to current position every second
-                if (Math.floor(currentPlayTime * 10) % 10 === 0) {{
+                // Scroll when moving to a new element or every 2 seconds
+                const timeSinceLastScroll = currentPlayTime - lastScrollTime;
+                if (timeSinceLastScroll >= 2) {{
                     scrollToTime(currentPlayTime);
+                    lastScrollTime = currentPlayTime;
+                }} else {{
+                    // Also check if we need to scroll to a new element
+                    const targetElement = findElementAtTime(currentPlayTime);
+                    if (targetElement && targetElement !== lastScrolledElement) {{
+                        scrollToTime(currentPlayTime);
+                        lastScrollTime = currentPlayTime;
+                    }}
                 }}
             }}, updateInterval);
         }}
