@@ -1377,6 +1377,48 @@ def save_html(result: dict, audio_path: Path, duration_seconds: float, model_siz
             min-width: 70px;
             text-align: right;
         }}
+        .play-btn {{
+            width: 36px;
+            height: 36px;
+            border: none;
+            border-radius: 50%;
+            background: var(--accent-color);
+            color: var(--bg-color);
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: transform 0.1s, opacity 0.2s;
+            flex-shrink: 0;
+        }}
+        .play-btn:hover {{
+            transform: scale(1.1);
+        }}
+        .play-btn.playing {{
+            opacity: 0.9;
+        }}
+        .play-btn svg {{
+            width: 18px;
+            height: 18px;
+        }}
+        .play-icon {{
+            margin-left: 2px;
+        }}
+        .speed-select {{
+            padding: 4px 8px;
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            background: var(--bg-color);
+            color: var(--text-color);
+            font-family: 'SF Mono', Consolas, monospace;
+            font-size: 0.75em;
+            cursor: pointer;
+            flex-shrink: 0;
+        }}
+        .speed-select:focus {{
+            outline: none;
+            border-color: var(--accent-color);
+        }}
         @media (max-width: 900px) {{
             .container {{ grid-template-columns: 1fr; }}
             .sidebar {{
@@ -1425,9 +1467,20 @@ def save_html(result: dict, audio_path: Path, duration_seconds: float, model_siz
         <main class="main">
             <div class="timeline-container">
                 <div class="timeline-wrapper">
+                    <button class="play-btn" id="play-btn" title="Play/Pause auto-scroll">
+                        <svg class="play-icon" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+                        <svg class="pause-icon" viewBox="0 0 24 24" fill="currentColor" style="display:none"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
+                    </button>
                     <span class="timeline-time" id="current-time">00:00:00</span>
                     <input type="range" class="timeline-slider" id="timeline" min="0" max="{int(duration_seconds)}" value="0">
                     <span class="timeline-duration">{format_timestamp(duration_seconds)}</span>
+                    <select class="speed-select" id="speed-select" title="Playback speed">
+                        <option value="0.5">0.5x</option>
+                        <option value="1" selected>1x</option>
+                        <option value="1.5">1.5x</option>
+                        <option value="2">2x</option>
+                        <option value="3">3x</option>
+                    </select>
                 </div>
             </div>
 
@@ -1507,6 +1560,107 @@ def save_html(result: dict, audio_path: Path, duration_seconds: float, model_siz
         timeline.addEventListener('mouseup', () => setTimeout(() => isScrolling = false, 500));
         timeline.addEventListener('touchstart', () => isScrolling = true);
         timeline.addEventListener('touchend', () => setTimeout(() => isScrolling = false, 500));
+
+        // Play/Pause auto-scroll functionality
+        const playBtn = document.getElementById('play-btn');
+        const playIcon = playBtn.querySelector('.play-icon');
+        const pauseIcon = playBtn.querySelector('.pause-icon');
+        const speedSelect = document.getElementById('speed-select');
+        const totalDuration = {int(duration_seconds)};
+
+        let isPlaying = false;
+        let playbackInterval = null;
+        let currentPlayTime = 0;
+        let playbackSpeed = 1;
+
+        function updatePlaybackUI() {{
+            if (isPlaying) {{
+                playIcon.style.display = 'none';
+                pauseIcon.style.display = 'block';
+                playBtn.classList.add('playing');
+            }} else {{
+                playIcon.style.display = 'block';
+                pauseIcon.style.display = 'none';
+                playBtn.classList.remove('playing');
+            }}
+        }}
+
+        function scrollToTime(time) {{
+            const targetElement = findElementAtTime(time);
+            if (targetElement) {{
+                const offset = document.querySelector('.timeline-container').offsetHeight + 20;
+                const elementTop = targetElement.getBoundingClientRect().top + window.pageYOffset - offset;
+                window.scrollTo({{ top: elementTop, behavior: 'smooth' }});
+            }}
+        }}
+
+        function startPlayback() {{
+            if (playbackInterval) clearInterval(playbackInterval);
+
+            // Get current position from slider
+            currentPlayTime = parseInt(timeline.value);
+
+            isScrolling = true; // Prevent scroll listener from interfering
+            isPlaying = true;
+            updatePlaybackUI();
+
+            // Update every 100ms for smooth progress
+            const updateInterval = 100;
+            playbackInterval = setInterval(() => {{
+                currentPlayTime += (updateInterval / 1000) * playbackSpeed;
+
+                if (currentPlayTime >= totalDuration) {{
+                    currentPlayTime = totalDuration;
+                    stopPlayback();
+                    return;
+                }}
+
+                timeline.value = currentPlayTime;
+                currentTimeDisplay.textContent = formatTime(Math.floor(currentPlayTime));
+
+                // Scroll to current position every second
+                if (Math.floor(currentPlayTime * 10) % 10 === 0) {{
+                    scrollToTime(currentPlayTime);
+                }}
+            }}, updateInterval);
+        }}
+
+        function stopPlayback() {{
+            if (playbackInterval) {{
+                clearInterval(playbackInterval);
+                playbackInterval = null;
+            }}
+            isPlaying = false;
+            isScrolling = false;
+            updatePlaybackUI();
+        }}
+
+        function togglePlayback() {{
+            if (isPlaying) {{
+                stopPlayback();
+            }} else {{
+                startPlayback();
+            }}
+        }}
+
+        playBtn.addEventListener('click', togglePlayback);
+
+        // Keyboard shortcut: Space to play/pause
+        document.addEventListener('keydown', (e) => {{
+            if (e.code === 'Space' && e.target.tagName !== 'INPUT') {{
+                e.preventDefault();
+                togglePlayback();
+            }}
+        }});
+
+        // Speed selector
+        speedSelect.addEventListener('change', (e) => {{
+            playbackSpeed = parseFloat(e.target.value);
+        }});
+
+        // Stop playback when user interacts with timeline
+        timeline.addEventListener('mousedown', stopPlayback);
+        timeline.addEventListener('touchstart', stopPlayback);
 
         // Search functionality
         document.getElementById('search').addEventListener('input', function(e) {{
