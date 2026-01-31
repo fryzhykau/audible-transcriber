@@ -1074,7 +1074,7 @@ def save_html(result: dict, audio_path: Path, duration_seconds: float, model_siz
     toc_html = ""
     for i, chapter in enumerate(chapters):
         toc_html += f'''
-            <li><a href="#chapter-{i + 1}">{html_lib.escape(chapter['title'])}</a></li>'''
+            <li><a href="#chapter-{i + 1}">{html_lib.escape(chapter['title'], quote=False)}</a></li>'''
 
     # Build chapters HTML with flowing paragraphs (with hidden timing data)
     chapters_html = ""
@@ -1088,11 +1088,11 @@ def save_html(result: dict, audio_path: Path, duration_seconds: float, model_siz
 
         paragraphs_html = ""
         for paragraph in paragraphs:
-            escaped_text = html_lib.escape(paragraph['text'])
+            escaped_text = html_lib.escape(paragraph['text'], quote=False)
             start_time = paragraph['start_time']
             paragraphs_html += f'<p data-time="{start_time}">{escaped_text}</p>\n'
 
-        chapter_title = html_lib.escape(chapter['title'])
+        chapter_title = html_lib.escape(chapter['title'], quote=False)
         chapter_start = chapter['start_time']
         chapters_html += f'''
         <section class="chapter" id="chapter-{i + 1}" data-time="{chapter_start}">
