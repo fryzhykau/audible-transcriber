@@ -865,7 +865,7 @@ def detect_chapters(segments: list, min_gap: float = 3.0) -> list:
     return chapters
 
 
-def save_transcript(result: dict, audio_path: Path, duration_seconds: float, model_size: str, stats: dict = None) -> list:
+def save_transcript(result: dict, audio_path: Path, duration_seconds: float, model_size: str, stats: dict = None, bg_color: str = "#ffffff") -> list:
     """Save transcript to multiple formats. Returns list of output file paths."""
     import json
 
@@ -951,7 +951,7 @@ def save_transcript(result: dict, audio_path: Path, duration_seconds: float, mod
     output_files.append(md_path)
 
     # HTML with chapters and TOC
-    html_path = save_html(result, audio_path, duration_seconds, model_size, chapters)
+    html_path = save_html(result, audio_path, duration_seconds, model_size, chapters, bg_color)
     output_files.append(html_path)
 
     return output_files
@@ -1062,7 +1062,7 @@ def save_markdown(result: dict, audio_path: Path, duration_seconds: float, model
     return md_path
 
 
-def save_html(result: dict, audio_path: Path, duration_seconds: float, model_size: str, chapters: list):
+def save_html(result: dict, audio_path: Path, duration_seconds: float, model_size: str, chapters: list, bg_color: str = "#ffffff"):
     """Save transcript as a clean, book-like HTML document."""
     html_path = audio_path.with_suffix('.html')
     segments = result["segments"]
@@ -1102,6 +1102,41 @@ def save_html(result: dict, audio_path: Path, duration_seconds: float, model_siz
             </div>
         </section>'''
 
+    # Derive complementary colors from background
+    def hex_to_rgb(hex_color):
+        hex_color = hex_color.lstrip('#')
+        return tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
+
+    def rgb_to_hex(rgb):
+        return '#{:02x}{:02x}{:02x}'.format(*rgb)
+
+    def darken(hex_color, factor=0.9):
+        r, g, b = hex_to_rgb(hex_color)
+        return rgb_to_hex((int(r * factor), int(g * factor), int(b * factor)))
+
+    def is_light(hex_color):
+        r, g, b = hex_to_rgb(hex_color)
+        luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255
+        return luminance > 0.5
+
+    # Set colors based on background
+    if is_light(bg_color):
+        text_color = "#2c2c2c"
+        chapter_color = "#1a1a1a"
+        accent_color = "#6b4c35"
+        border_color = darken(bg_color, 0.9)
+        sidebar_bg = darken(bg_color, 0.96)
+        link_color = "#6b4c35"
+        highlight_bg = "#fff3cd"
+    else:
+        text_color = "#e0ddd8"
+        chapter_color = "#f0eeeb"
+        accent_color = "#c9a87c"
+        border_color = "#333"
+        sidebar_bg = darken(bg_color, 0.8)
+        link_color = "#c9a87c"
+        highlight_bg = "#3d3520"
+
     html_content = f'''<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1110,26 +1145,14 @@ def save_html(result: dict, audio_path: Path, duration_seconds: float, model_siz
     <title>{html_lib.escape(title)}</title>
     <style>
         :root {{
-            --bg-color: #faf9f7;
-            --text-color: #2c2c2c;
-            --chapter-color: #1a1a1a;
-            --accent-color: #6b4c35;
-            --border-color: #e0ddd8;
-            --sidebar-bg: #f0eeeb;
-            --link-color: #6b4c35;
-            --highlight-bg: #fff3cd;
-        }}
-        @media (prefers-color-scheme: dark) {{
-            :root {{
-                --bg-color: #1a1a1a;
-                --text-color: #e0ddd8;
-                --chapter-color: #f0eeeb;
-                --accent-color: #c9a87c;
-                --border-color: #333;
-                --sidebar-bg: #242424;
-                --link-color: #c9a87c;
-                --highlight-bg: #3d3520;
-            }}
+            --bg-color: {bg_color};
+            --text-color: {text_color};
+            --chapter-color: {chapter_color};
+            --accent-color: {accent_color};
+            --border-color: {border_color};
+            --sidebar-bg: {sidebar_bg};
+            --link-color: {link_color};
+            --highlight-bg: {highlight_bg};
         }}
         * {{ box-sizing: border-box; margin: 0; padding: 0; }}
         body {{
@@ -1251,6 +1274,51 @@ def save_html(result: dict, audio_path: Path, duration_seconds: float, model_siz
             text-align: center;
             font-style: italic;
         }}
+        .settings {{
+            margin-top: 20px;
+            padding-top: 15px;
+            border-top: 1px solid var(--border-color);
+        }}
+        .settings-label {{
+            font-size: 0.8em;
+            color: var(--text-color);
+            opacity: 0.7;
+            margin-bottom: 8px;
+            display: block;
+        }}
+        .color-picker-row {{
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 8px;
+        }}
+        .color-picker {{
+            width: 32px;
+            height: 32px;
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            cursor: pointer;
+            padding: 0;
+        }}
+        .color-presets {{
+            display: flex;
+            gap: 4px;
+            flex-wrap: wrap;
+        }}
+        .color-preset {{
+            width: 24px;
+            height: 24px;
+            border: 1px solid var(--border-color);
+            border-radius: 3px;
+            cursor: pointer;
+            transition: transform 0.1s;
+        }}
+        .color-preset:hover {{
+            transform: scale(1.1);
+        }}
+        .color-preset.active {{
+            border: 2px solid var(--accent-color);
+        }}
         .timeline-container {{
             position: sticky;
             top: 0;
@@ -1337,6 +1405,21 @@ def save_html(result: dict, audio_path: Path, duration_seconds: float, model_siz
                 <ul class="toc">{toc_html}
                 </ul>
             </nav>
+            <div class="settings">
+                <span class="settings-label">Background</span>
+                <div class="color-picker-row">
+                    <input type="color" id="bg-color-picker" class="color-picker" value="{bg_color}">
+                </div>
+                <div class="color-presets">
+                    <div class="color-preset" data-color="#ffffff" style="background:#ffffff" title="White"></div>
+                    <div class="color-preset" data-color="#f5f5dc" style="background:#f5f5dc" title="Beige"></div>
+                    <div class="color-preset" data-color="#faf9f7" style="background:#faf9f7" title="Warm White"></div>
+                    <div class="color-preset" data-color="#f0ead6" style="background:#f0ead6" title="Eggshell"></div>
+                    <div class="color-preset" data-color="#e8e4d9" style="background:#e8e4d9" title="Parchment"></div>
+                    <div class="color-preset" data-color="#1a1a1a" style="background:#1a1a1a" title="Dark"></div>
+                    <div class="color-preset" data-color="#2d2d2d" style="background:#2d2d2d" title="Charcoal"></div>
+                </div>
+            </div>
         </aside>
 
         <main class="main">
@@ -1462,6 +1545,91 @@ def save_html(result: dict, audio_path: Path, duration_seconds: float, model_siz
             link.addEventListener('click', function(e) {{
                 e.preventDefault();
                 document.querySelector(this.getAttribute('href')).scrollIntoView({{ behavior: 'smooth' }});
+            }});
+        }});
+
+        // Background color picker functionality
+        const colorPicker = document.getElementById('bg-color-picker');
+        const colorPresets = document.querySelectorAll('.color-preset');
+        const storageKey = 'book-bg-color';
+
+        function hexToRgb(hex) {{
+            const result = /^#?([a-f\\d]{{2}})([a-f\\d]{{2}})([a-f\\d]{{2}})$/i.exec(hex);
+            return result ? {{
+                r: parseInt(result[1], 16),
+                g: parseInt(result[2], 16),
+                b: parseInt(result[3], 16)
+            }} : null;
+        }}
+
+        function rgbToHex(r, g, b) {{
+            return '#' + [r, g, b].map(x => x.toString(16).padStart(2, '0')).join('');
+        }}
+
+        function darken(hex, factor) {{
+            const rgb = hexToRgb(hex);
+            return rgbToHex(
+                Math.round(rgb.r * factor),
+                Math.round(rgb.g * factor),
+                Math.round(rgb.b * factor)
+            );
+        }}
+
+        function isLight(hex) {{
+            const rgb = hexToRgb(hex);
+            const luminance = (0.299 * rgb.r + 0.587 * rgb.g + 0.114 * rgb.b) / 255;
+            return luminance > 0.5;
+        }}
+
+        function applyBackgroundColor(color) {{
+            const root = document.documentElement;
+            root.style.setProperty('--bg-color', color);
+
+            if (isLight(color)) {{
+                root.style.setProperty('--text-color', '#2c2c2c');
+                root.style.setProperty('--chapter-color', '#1a1a1a');
+                root.style.setProperty('--accent-color', '#6b4c35');
+                root.style.setProperty('--border-color', darken(color, 0.9));
+                root.style.setProperty('--sidebar-bg', darken(color, 0.96));
+                root.style.setProperty('--link-color', '#6b4c35');
+                root.style.setProperty('--highlight-bg', '#fff3cd');
+            }} else {{
+                root.style.setProperty('--text-color', '#e0ddd8');
+                root.style.setProperty('--chapter-color', '#f0eeeb');
+                root.style.setProperty('--accent-color', '#c9a87c');
+                root.style.setProperty('--border-color', '#444');
+                root.style.setProperty('--sidebar-bg', darken(color, 0.8));
+                root.style.setProperty('--link-color', '#c9a87c');
+                root.style.setProperty('--highlight-bg', '#3d3520');
+            }}
+
+            // Update color picker value
+            colorPicker.value = color;
+
+            // Update preset highlights
+            colorPresets.forEach(preset => {{
+                preset.classList.toggle('active', preset.dataset.color === color);
+            }});
+
+            // Save to localStorage
+            localStorage.setItem(storageKey, color);
+        }}
+
+        // Load saved color on page load
+        const savedColor = localStorage.getItem(storageKey);
+        if (savedColor) {{
+            applyBackgroundColor(savedColor);
+        }}
+
+        // Color picker change handler
+        colorPicker.addEventListener('input', (e) => {{
+            applyBackgroundColor(e.target.value);
+        }});
+
+        // Preset click handlers
+        colorPresets.forEach(preset => {{
+            preset.addEventListener('click', () => {{
+                applyBackgroundColor(preset.dataset.color);
             }});
         }});
     </script>
@@ -1667,6 +1835,12 @@ def main():
         action="store_true",
         help="Disable chunk-based processing for faster-whisper (process entire file at once)"
     )
+    parser.add_argument(
+        "--bg-color",
+        type=str,
+        default="#ffffff",
+        help="Background color for HTML output (default: #ffffff white). Use hex colors like #f5f5dc for beige"
+    )
 
     args = parser.parse_args()
 
@@ -1716,7 +1890,7 @@ def main():
         )
 
     # Save transcripts
-    output_files = save_transcript(result, audio_path, duration_seconds, args.model, stats)
+    output_files = save_transcript(result, audio_path, duration_seconds, args.model, stats, args.bg_color)
 
     # Display statistics
     if not args.no_stats:
