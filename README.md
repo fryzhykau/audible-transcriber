@@ -105,6 +105,10 @@ The scripts generate multiple output files:
 - Activation bytes are stored locally in `~/.audible_auth.json`
 - This tool is intended for personal use of legally purchased audiobooks
 
+## Disclaimer
+
+This tool is for personal backup and accessibility purposes only. Users are responsible for ensuring their use complies with local laws and Audible's Terms of Service.
+
 ## License
 
 MIT License - see [LICENSE](LICENSE) for details.
