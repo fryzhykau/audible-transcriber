@@ -1797,6 +1797,86 @@ def save_html(result: dict, audio_path: Path, duration_seconds: float, model_siz
     return html_path
 
 
+def update_existing_html(html_path: Path, bg_color: str = "#ffffff") -> Path:
+    """Update an existing HTML file with new features (color picker, play button, etc.)."""
+    import re
+
+    print(f"Updating HTML: {html_path}")
+
+    with open(html_path, 'r', encoding='utf-8') as f:
+        content = f.read()
+
+    # Extract title
+    title_match = re.search(r'<title>([^<]+)</title>', content)
+    title = title_match.group(1) if title_match else html_path.stem
+
+    # Extract duration from timeline max attribute
+    duration_match = re.search(r'max="(\d+)"', content)
+    duration_seconds = int(duration_match.group(1)) if duration_match else 0
+
+    # Extract chapters with their content
+    chapters_match = re.findall(
+        r'<section class="chapter" id="chapter-(\d+)" data-time="([\d.]+)">\s*<h2>([^<]+)</h2>\s*<div class="chapter-content">(.*?)</div>\s*</section>',
+        content, re.DOTALL
+    )
+
+    # Extract colophon
+    colophon_match = re.search(r'<div class="colophon">(.*?)</div>', content, re.DOTALL)
+    colophon_content = colophon_match.group(1) if colophon_match else ""
+
+    # Build result dict from extracted data
+    segments = []
+    for chapter_id, chapter_time, chapter_title, chapter_content in chapters_match:
+        # Extract paragraphs with their timestamps
+        para_matches = re.findall(r'<p data-time="([\d.]+)">([^<]+)</p>', chapter_content)
+        for para_time, para_text in para_matches:
+            segments.append({
+                "start": float(para_time),
+                "end": float(para_time) + 10,  # Approximate
+                "text": para_text
+            })
+
+    # Build chapters list
+    chapters = []
+    segment_idx = 0
+    for chapter_id, chapter_time, chapter_title, chapter_content in chapters_match:
+        para_count = len(re.findall(r'<p data-time=', chapter_content))
+        chapters.append({
+            'title': chapter_title,
+            'start_time': float(chapter_time),
+            'start_segment_idx': segment_idx,
+            'type': 'detected'
+        })
+        segment_idx += para_count
+
+    if not chapters:
+        print("Could not parse chapters from existing HTML. File may be in old format.")
+        return html_path
+
+    # Create result dict
+    result = {
+        "text": " ".join(seg["text"] for seg in segments),
+        "segments": segments,
+        "language": "en"
+    }
+
+    # Re-generate HTML with new template
+    print(f"Found {len(chapters)} chapters, {len(segments)} paragraphs")
+    print(f"Duration: {format_timestamp(duration_seconds)}")
+
+    # Backup original
+    backup_path = html_path.with_suffix('.html.bak')
+    import shutil
+    shutil.copy(html_path, backup_path)
+    print(f"Backup saved to: {backup_path}")
+
+    # Generate new HTML
+    new_html_path = save_html(result, html_path, duration_seconds, "medium", chapters, bg_color)
+
+    print(f"Updated HTML saved to: {new_html_path}")
+    return new_html_path
+
+
 def format_srt_timestamp(seconds: float) -> str:
     """Convert seconds to SRT timestamp format (HH:MM:SS,mmm)."""
     hours = int(seconds // 3600)
@@ -1995,6 +2075,11 @@ def main():
         default="#ffffff",
         help="Background color for HTML output (default: #ffffff white). Use hex colors like #f5f5dc for beige"
     )
+    parser.add_argument(
+        "--update-html",
+        action="store_true",
+        help="Update an existing HTML file with new features (color picker, play button). Pass HTML path as audiobook arg."
+    )
 
     args = parser.parse_args()
 
@@ -2011,6 +2096,15 @@ def main():
     if not audio_path.exists():
         print(f"Error: File not found: {audio_path}")
         sys.exit(1)
+
+    # Handle --update-html mode
+    if args.update_html:
+        if audio_path.suffix.lower() != '.html':
+            print("Error: --update-html requires an HTML file path")
+            sys.exit(1)
+        update_existing_html(audio_path, args.bg_color)
+        print("\nHTML update complete!")
+        return
 
     # Convert AAX if needed
     if audio_path.suffix.lower() == '.aax' and not args.skip_convert:
